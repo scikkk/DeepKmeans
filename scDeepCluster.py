@@ -10,7 +10,20 @@ import numpy as np
 from sklearn.cluster import KMeans
 import math, os
 from sklearn import metrics
-#from single_cell_tools import cluster_acc
+
+def cluster_acc(y_true, y_pred):
+    """
+    Calculate clustering accuracy. Require scikit-learn installed
+    # Arguments
+        y: true labels, numpy.array with shape `(n_samples,)`
+        y_pred: predicted labels, numpy.array with shape `(n_samples,)`
+    # Return
+        nmi, ari
+    """
+    # print(y_true,y_pred)
+    nmi = np.round(metrics.normalized_mutual_info_score(y_true, y_pred), 5)
+    ari = np.round(metrics.adjusted_rand_score(y_true, y_pred), 5)
+    return nmi, ari
 
 def buildNetwork(layers, type, activation="relu"):
     net = []
@@ -139,7 +152,7 @@ class scDeepCluster(nn.Module):
         torch.save(state, newfilename)
 
     def fit(self, X, X_raw, size_factor, n_clusters, init_centroid=None, y=None, y_pred_init=None, lr=1., batch_size=256, 
-            num_epochs=10, update_interval=1, tol=1e-3, save_dir=""):
+            num_epochs=1, update_interval=1, tol=1e-3, save_dir=""):
         '''X: tensor data'''
         self.train()
         print("Clustering stage")
@@ -162,8 +175,7 @@ class scDeepCluster(nn.Module):
             self.y_pred_last = self.y_pred
         if y is not None:
 #            acc = np.round(cluster_acc(y, self.y_pred), 5)
-            nmi = np.round(metrics.normalized_mutual_info_score(y, self.y_pred), 5)
-            ari = np.round(metrics.adjusted_rand_score(y, self.y_pred), 5)
+            nmi, ari=cluster_acc(y, self.y_pred)
             print('Initializing k-means: NMI= %.4f, ARI= %.4f' % (nmi, ari))
 
         num = X.shape[0]
@@ -171,71 +183,20 @@ class scDeepCluster(nn.Module):
 
         final_acc, final_nmi, final_ari, final_epoch = 0, 0, 0, 0
 
+        # update the targe distribution p
+        latent = self.encodeBatch(X.to(self.device))
+        q = self.soft_assign(latent)
+        p = self.target_distribution(q).data
 
-        for epoch in range(num_epochs):
-            if epoch%update_interval == 0:
-                # update the targe distribution p
-                latent = self.encodeBatch(X.to(self.device))
-                q = self.soft_assign(latent)
-                p = self.target_distribution(q).data
+        # evalute the clustering performance
+        self.y_pred = torch.argmax(q, dim=1).data.cpu().numpy()
 
-                # evalute the clustering performance
-                self.y_pred = torch.argmax(q, dim=1).data.cpu().numpy()
-
-                if y is not None:
-#                    final_acc = acc = np.round(cluster_acc(y, self.y_pred), 5)
-                    final_nmi = nmi = np.round(metrics.normalized_mutual_info_score(y, self.y_pred), 5)
-                    final_epoch = ari = np.round(metrics.adjusted_rand_score(y, self.y_pred), 5)
-                    print('Clustering   %d: NMI= %.4f, ARI= %.4f' % (epoch+1, nmi, ari))
-
-                # save current model
-                if (epoch>0 and delta_label < tol) or epoch%10 == 0:
-                    self.save_checkpoint({'epoch': epoch+1,
-                            'state_dict': self.state_dict(),
-                            'mu': self.mu,
-                            'y_pred': self.y_pred,
-                            'y_pred_last': self.y_pred_last,
-                            'y': y
-                            }, epoch+1, filename=save_dir)
-
-                # check stop criterion
-                delta_label = np.sum(self.y_pred != self.y_pred_last).astype(np.float32) / num
-                self.y_pred_last = self.y_pred
-                if epoch>0 and delta_label < tol:
-                    print('delta_label ', delta_label, '< tol ', tol)
-                    print("Reach tolerance threshold. Stopping training.")
-                    break
+        if y is not None:
+            final_nmi = nmi = np.round(metrics.normalized_mutual_info_score(y, self.y_pred), 5)
+            final_epoch = ari = np.round(metrics.adjusted_rand_score(y, self.y_pred), 5)
+            print('Clustering   : NMI= %.4f, ARI= %.4f' % (nmi, ari))
 
 
-            # train 1 epoch for clustering loss
-            train_loss = 0.0
-            recon_loss_val = 0.0
-            cluster_loss_val = 0.0
-            for batch_idx in range(num_batch):
-                xbatch = X[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
-                xrawbatch = X_raw[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
-                sfbatch = size_factor[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
-                pbatch = p[batch_idx*batch_size : min((batch_idx+1)*batch_size, num)]
-                optimizer.zero_grad()
-                inputs = Variable(xbatch).to(self.device)
-                rawinputs = Variable(xrawbatch).to(self.device)
-                sfinputs = Variable(sfbatch).to(self.device)
-                target = Variable(pbatch).to(self.device)
-
-                zbatch, qbatch, meanbatch, dispbatch, pibatch = self.forward(inputs)
-
-                cluster_loss = self.cluster_loss(target, qbatch)
-                recon_loss = self.zinb_loss(rawinputs, meanbatch, dispbatch, pibatch, sfinputs)
-
-                loss = cluster_loss*self.gamma + recon_loss
-                loss.backward()
-                optimizer.step()
-                cluster_loss_val += cluster_loss.item() * len(inputs)
-                recon_loss_val += recon_loss.item() * len(inputs)
-                train_loss += loss.item() * len(inputs)
-
-            print("Epoch %3d: Total: %.8f Clustering Loss: %.8f ZINB Loss: %.8f" % (
-                epoch + 1, train_loss / num, cluster_loss_val / num, recon_loss_val / num))
-
+        
         return self.y_pred, final_acc, final_nmi, final_ari, final_epoch
 

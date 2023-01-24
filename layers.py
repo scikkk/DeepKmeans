@@ -1,7 +1,14 @@
+'''
+Author: scikkk 203536673@qq.com
+Date: 2022-06-25 12:56:02
+LastEditors: scikkk
+LastEditTime: 2023-01-24 23:42:28
+Description: file content
+'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+
 
 
 class ZINBLoss(nn.Module):
